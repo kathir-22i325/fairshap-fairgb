@@ -42,44 +42,33 @@ def load_dataset(dataset_name):
 
 
 def german_credit():
-    '''Load the German Credit dataset and preprocess it.'''
+    '''Load your German Credit–style CSV and preprocess it.'''
     # Load data
     data = pd.read_csv('dataset/german_credit/german_credit.csv')
     original_data = data.copy()
 
-    # Print number of missing values per column
-    missing_values = data.isnull().sum()
-    print(missing_values)
+    # --- 1. Map target variable ---
+    # GoodCustomer: 1 = good, -1 = bad
+    data['GoodCustomer'] = data['GoodCustomer'].map({1: 0, -1: 1})  # 0=good, 1=bad
 
-    # Handle missing values
-    saving_imputer = SimpleImputer(strategy='most_frequent')
-    checking_imputer = SimpleImputer(strategy='most_frequent')
-    data['Saving accounts'] = saving_imputer.fit_transform(data[['Saving accounts']]).ravel()
-    data['Checking account'] = checking_imputer.fit_transform(data[['Checking account']]).ravel()
+    # --- 2. Encode gender ---
+    # Sex: Male=0, Female=1
+    data['Sex'] = data['Sex'].map({'Male': 0, 'Female': 1})
 
-    # 1. Standardize continuous variables
+    # --- 3. Standardize continuous variables ---
     scaler = StandardScaler()
-    data[['Age', 'Credit amount', 'Duration']] = scaler.fit_transform(data[['Age', 'Credit amount', 'Duration']])
+    numeric_cols = ['Age', 'LoanDuration', 'LoanAmount', 'LoanRateAsPercentOfIncome']
+    data[numeric_cols] = scaler.fit_transform(data[numeric_cols])
 
-    # 2. Encode gender variable
-    data['Sex'] = data['Sex'].map({'male': 0, 'female': 1})
+    # --- 4. One-hot encode categorical variables ---
+    categorical_cols = ['PurposeOfLoan']
+    data = pd.get_dummies(data, columns=categorical_cols, drop_first=False)
 
-    # 3. One-hot encode categorical variables
-    categorical_columns = ['Job', 'Housing', 'Saving accounts', 'Checking account', 'Purpose']
-    data = pd.get_dummies(data, columns=categorical_columns, drop_first=False)
+    # --- 5. Move target to last column ---
+    y = data.pop('GoodCustomer')
+    data['GoodCustomer'] = y
 
-    # Convert boolean one-hot encoded columns to integers
-    for column in data.select_dtypes(include=['bool']).columns:
-        data[column] = data[column].astype(int)
-
-    # 4. Map target variable
-    data['Risk'] = data['Risk'].map({'good': 0, 'bad': 1})
-
-    # Move Risk column to last position
-    risk_column = data.pop('Risk')
-    data['Risk'] = risk_column
-
-    # Rename Sex column to sex
+    # --- 6. Rename columns for consistency ---
     data.rename(columns={'Sex': 'sex'}, inplace=True)
 
     return original_data, data

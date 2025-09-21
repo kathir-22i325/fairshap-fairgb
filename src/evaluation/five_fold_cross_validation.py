@@ -1,8 +1,8 @@
 from sklearn.model_selection import KFold
 import numpy as np
 from src.experiments.experiment import Experiment
-from src.experiments.experiment_eo import Experiment as ExperimentEO
-from src.experiments.experiment_new_eo import Experiment as ExperimentNewEO
+# from src.experiments.experiment_eo import Experiment as ExperimentEO
+# from src.experiments.experiment_new_eo import Experiment as ExperimentNewEO
 import pandas as pd
 
 
@@ -25,10 +25,12 @@ def evaluate_model(model, X_train:pd.DataFrame, y_train:pd.Series, num_folds, da
         # evaluate the model
         if fairshap_base == 'DR' or fairshap_base == 'DP':
             experiment = Experiment(model=model, X_train=X_train_fold, y_train=y_train_fold, X_test=X_val_fold, y_test=y_val_fold, dataset_name=dataset_name, fairshap_base=fairshap_base, matching_method=matching_method)
-            experiment.run(ith_fold=i, threshold=thresh)
+            acc = experiment.run(ith_fold=i, threshold=thresh)
+            scores.append(acc)
         elif fairshap_base == 'EO':
             experiment = ExperimentNewEO(model=model, X_train=X_train_fold, y_train=y_train_fold, X_test=X_val_fold, y_test=y_val_fold, dataset_name=dataset_name, fairshap_base=fairshap_base)
-            experiment.run(ith_fold=i)
+            acc = experiment.run(ith_fold=i)
+            scores.append(acc)
         i += 1
 
 
@@ -57,9 +59,9 @@ if __name__ == '__main__':
     X = df.drop('Risk', axis=1)
     y = df['Risk']
 
-    model = XGBClassifier()  # XGboost can be replaced by RandomForestClassifier() tc.
+    model = XGBClassifier(device="cuda", tree_method="hist")  # XGboost can be replaced by RandomForestClassifier() tc.
     
-    evaluate_model(model=model, X_train=X, y_train=y, num_folds=5, dataset_name='german_credit')
+    evaluate_model(model=model, X_train=X, y_train=y, num_folds=5, dataset_name='census_income_kdd')
 
 
 

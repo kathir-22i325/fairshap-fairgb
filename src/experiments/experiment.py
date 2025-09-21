@@ -14,6 +14,9 @@ from src.matching.nn_matcher import NearestNeighborDataMatcher
 from src.attribution import FairnessExplainer
 from src.composition.data_composer import DataComposer
 from src.attribution.oracle_metric import perturb_numpy_ver
+import torch
+from torch_geometric.data import Data
+
 
 
 
@@ -236,48 +239,139 @@ class Experiment:
             top_positions = flat_varphi_sorted[:action_number]
             # Step 4: Replace values in X_change at top positions
             for value, row_idx, col_idx in top_positions:
-                X_change.iloc[row_idx, col_idx] = q[row_idx, col_idx]
+                col = X_change.columns[col_idx]
+                if pd.api.types.is_categorical_dtype(X_change[col]):
+        # Add new value to the category if it doesn't exist
+                    if value not in X_change[col].cat.categories:
+                        X_change[col] = X_change[col].cat.add_categories([value])
+                    X_change.iloc[row_idx, col_idx] = value
+                elif pd.api.types.is_bool_dtype(X_change[col]) or pd.api.types.is_integer_dtype(X_change[col]):
+        # Convert column to float before assignment
+                    X_change[col] = X_change[col].astype(float)
+                    X_change.iloc[row_idx, col_idx] = value
+                else:
+        # For existing float columns
+                    X_change.iloc[row_idx, col_idx] = value
+
+           
             x = X_change
             y = pd.concat([y_train_minority_label0, y_train_minority_label1, y_train_majority_label0, y_train_majority_label1], axis=0)
-            # Step 6: Train the new model            
-            model_new = XGBClassifier()
-            model_new.fit(x, y)
-            # Step 7: Evaluate the new model's performance on DR, DP, EO, PQP
-            new_DR = fairness_value_function(sen_att, priv_val, unpriv_dict, self.X_test.values, model_new)
-            y_hat = model_new.predict(self.X_test)
-            y_test = self.y_test
-            new_accuracy = accuracy_score(self.y_test, y_hat)
-            g1_Cm, g0_Cm = marginalised_np_mat(y_test, y_hat, 1, priv_idx)
-            new_DP = grp1_DP(g1_Cm, g0_Cm)[0]
-            new_EO = grp2_EO(g1_Cm, g0_Cm)[0]
-            new_PQP = grp3_PQP(g1_Cm, g0_Cm)[0]
-            accuracy_results.append(new_accuracy)
-            DR_results.append(new_DR)
-            DP_results.append(new_DP)
-            EO_results.append(new_EO)
-            PQP_results.append(new_PQP)
-        print('8. Save results to CSV file')
-        df = pd.DataFrame({
-            "action_number": values_range,  # Directly use values_range
-            "new_accuracy": accuracy_results,
-            "new_DR": DR_results,
-            "new_DP": DP_results,
-            "new_EO": EO_results,
-            "new_PQP": PQP_results,
-        })
-        df.loc[-1] = ["original", original_accuracy, original_DR, original_DP, original_EO, original_PQP]  # Insert as first row
-        df.index = df.index + 1  # Reindex
-        df = df.sort_index()  # Ensure the 'original' row is at the top
-        dataset_folder = os.path.join('saved_results', self.dataset_name)
-        os.makedirs(dataset_folder, exist_ok=True)
-        # Generate CSV filename
-        csv_filename = f"fairSHAP-{self.fairshap_base}_{threshold}_{self.matching_method}_{self.ith_fold}-fold_results.csv"
-        csv_filepath = os.path.join(dataset_folder, csv_filename)
-        # Save CSV
-        df.to_csv(csv_filepath, index=False)
-        print(f"CSV file saved: {csv_filepath}")
+            for col in x.columns:
+                if x[col].dtype == 'object':
+                    x[col] = x[col].astype('category')
 
+            for col in x.select_dtypes(include=['float']).columns:
+                unique_vals = set(x[col].dropna().unique())
+                if unique_vals.issubset({0.0, 1.0}):
+                    x[col] = x[col].astype(bool)
+            # Step 6: Prepare data for FairGB (graph-based model)
 
+            # --- Robust feature conversion: ensure all columns are numeric floats ---
+            x = x.copy()
+            for col in x.columns:
+                if pd.api.types.is_object_dtype(x[col]) or pd.api.types.is_categorical_dtype(x[col]):
+                    x[col] = x[col].astype('category').cat.codes
+            x = x.fillna(0)
+            x = x.astype(float)
+            x_tensor = torch.tensor(x.values, dtype=torch.float)
+
+            # --- Robust label conversion: ensure 0/1, float, shape (N,1) ---
+            y_np = y.values.copy()
+            y_np = np.where(y_np == -1, 0, y_np)  # convert -1 to 0 if needed
+            y_tensor = torch.tensor(y_np, dtype=torch.float) # shape (N,1)
+
+            # --- Sensitive attribute as integer ---
+            sens_tensor = torch.tensor(x[self.sensitive_attri].values, dtype=torch.long)
+
+            # --- Build fully connected edge_index ---
+            num_nodes = x_tensor.shape[0]
+            row, col = [], []
+            for i in range(num_nodes):
+                for j in range(num_nodes):
+                    if i != j:
+                        row.append(i)
+                        col.append(j)
+            edge_index = torch.tensor([row, col], dtype=torch.long)
+
+            data = Data(x=x_tensor, y=y_tensor, sens=sens_tensor, edge_index=edge_index)
+            data.train_mask = torch.ones(num_nodes, dtype=torch.bool)
+            data.val_mask = torch.ones(num_nodes, dtype=torch.bool)
+            data.test_mask = torch.ones(num_nodes, dtype=torch.bool)
+
+            # Set up FairGB args (as in main.py)
+            class Args:
+                runs = 1
+                epochs = 50
+                c_lr = 0.01
+                c_wd = 0
+                e_lr = 0.01
+                e_wd = 0
+                dropout = 0.5
+                hidden = 16
+                seed = 0
+                encoder = 'SAGE'
+                alpha = 1
+                gpu_num = 0
+                warmup = 5
+                eta = 0.5
+                device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+                num_features = x_tensor.shape[1]
+                num_classes = 1
+
+            args = Args()
+
+            # Train and evaluate FairGB
+            from FairGB.main import run
+            acc, f1, auc_roc, parity, equality = run(data, args)
+            # Optionally, append FairGB's accuracy to results (use acc[-1] for last epoch)
+            
+            accuracy_results.append(float(np.mean(acc)))
+            print("The accuracyis ", accuracy_results)
+            return accuracy_results[-1]
+
+        #     # If you want to keep XGBoost retraining for comparison, keep the following block:
+        #     model_new = copy.deepcopy(self.model)
+        #     model_new.fit(x, y)
+
+        #     # Evaluate the new model's performance on DR, DP, EO, PQP
+        #     new_DR = fairness_value_function(sen_att, priv_val, unpriv_dict, self.X_test.values, model_new)
+        #     y_hat = model_new.predict(self.X_test)
+        #     y_test = self.y_test
+        #     new_accuracy = accuracy_score(self.y_test, y_hat)
+        #     g1_Cm, g0_Cm = marginalised_np_mat(y_test, y_hat, 1, priv_idx)
+        #     new_DP = grp1_DP(g1_Cm, g0_Cm)[0]
+        #     new_EO = grp2_EO(g1_Cm, g0_Cm)[0]
+        #     new_PQP = grp3_PQP(g1_Cm, g0_Cm)[0]
+        #     accuracy_results.append(new_accuracy)
+        #     DR_results.append(new_DR)
+        #     DP_results.append(new_DP)
+        #     EO_results.append(new_EO)
+        #     PQP_results.append(new_PQP)
+        # print('8. Save results to CSV file')
+        # df = pd.DataFrame({
+        #     "action_number": values_range,  # Directly use values_range
+        #     "new_accuracy": accuracy_results,
+        #     "new_DR": DR_results,
+        #     "new_DP": DP_results,
+        #     "new_EO": EO_results,
+        #     "new_PQP": PQP_results,
+        # })
+        # df.loc[-1] = ["original", original_accuracy, original_DR, original_DP, original_EO, original_PQP]  # Insert as first row
+        # df.index = df.index + 1  # Reindex
+        # df = df.sort_index()  # Ensure the 'original' row is at the top
+        # dataset_folder = os.path.join('saved_results', self.dataset_name)
+        # os.makedirs(dataset_folder, exist_ok=True)
+        # # Generate CSV filename
+        # csv_filename = f"fairSHAP-{self.fairshap_base}_{threshold}_{self.matching_method}_{self.ith_fold}-fold_results.csv"
+        # csv_filepath = os.path.join(dataset_folder, csv_filename)
+        # # Save CSV
+        # df.to_csv(csv_filepath, index=False)
+        # print(f"CSV file saved: {csv_filepath}")
+        # return original_accuracy
+       
+    
+        
+    
 
 
     def _split_into_majority_minority_label0_label1(self):

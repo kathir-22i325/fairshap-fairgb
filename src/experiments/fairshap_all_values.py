@@ -38,7 +38,7 @@ class FairSHAP:
             print("-------------------------------------")
             if self.dataset_name == 'german_credit':
                 self.sen_att_name = 'sex'
-                self.target_name = 'Risk'
+                self.target_name = 'GoodCustomer'
                 self.priv = 0
             elif self.dataset_name == 'adult':
                 self.sen_att_name = 'sex'
